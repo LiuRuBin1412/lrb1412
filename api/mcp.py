@@ -1,40 +1,82 @@
-from fastmcp import FastMCP
+import json
+from fastapi import FastAPI, Request
 from mangum import Mangum
-import akshare as ak
 
-mcp = FastMCP("AKShare金融数据")
+app = FastAPI()
 
-# 工具1：个股日线行情
-@mcp.tool(description="获取A股个股日线历史行情，前复权")
-def stock_daily(symbol: str, start_date: str, end_date: str) -> str:
-    try:
-        df = ak.stock_zh_a_hist(
-            symbol=symbol, period="daily",
-            start_date=start_date, end_date=end_date, adjust="qfq"
-        )
-        return df.head(30).to_markdown(index=False)
-    except Exception as e:
-        return f"查询失败: {str(e)}"
+# MCP 工具定义
+TOOLS = [
+    {
+        "name": "add",
+        "description": "加法测试工具，计算两个整数的和",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "a": {"type": "integer"},
+                "b": {"type": "integer"}
+            },
+            "required": ["a", "b"]
+        }
+    }
+]
 
-# 工具2：主要指数实时行情
-@mcp.tool(description="获取上证指数、深证成指等主要指数实时行情")
-def index_realtime() -> str:
-    try:
-        df = ak.stock_zh_index_spot_em()
-        return df.to_markdown(index=False)
-    except Exception as e:
-        return f"查询失败: {str(e)}"
+@app.post("/api/mcp")
+async def mcp_endpoint(request: Request):
+    body = await request.json()
+    method = body.get("method")
+    req_id = body.get("id")
+    params = body.get("params", {})
 
-# 工具3：个股实时快照
-@mcp.tool(description="获取单只股票实时行情数据")
-def stock_spot(symbol: str) -> str:
-    try:
-        df = ak.stock_zh_a_spot_em()
-        target = df[df["代码"] == symbol]
-        return target.to_markdown(index=False)
-    except Exception as e:
-        return f"查询失败: {str(e)}"
+    # 初始化握手
+    if method == "initialize":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": {}
+                },
+                "serverInfo": {
+                    "name": "AKShare-MCP",
+                    "version": "1.0.0"
+                }
+            }
+        }
 
-# 直接生成 ASGI 应用并交给 Mangum 适配 Vercel
-app = mcp.streamable_http_app()
+    # 工具列表
+    elif method == "tools/list":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {"tools": TOOLS}
+        }
+
+    # 工具调用
+    elif method == "tools/call":
+        name = params.get("name")
+        args = params.get("arguments", {})
+        if name == "add":
+            result = args["a"] + args["b"]
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{"type": "text", "text": str(result)}]
+                }
+            }
+
+    # 心跳
+    elif method == "notifications/initialized":
+        return {}
+
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "error": {
+            "code": -32601,
+            "message": "Method not found"
+        }
+    }
+
 handler = Mangum(app)
