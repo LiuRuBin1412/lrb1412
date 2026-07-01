@@ -3,8 +3,5 @@
     "api/mcp.py": {
       "maxDuration": 10
     }
-  },
-  "routes": [
-    { "src": "/api/mcp", "dest": "/api/mcp.py" }
-  ]
+  }
 }
