@@ -1,12 +1,23 @@
 import os
+from fastapi import FastAPI, Request, HTTPException
 from fastmcp import FastMCP
 from mangum import Mangum
 import akshare as ak
 
-# 可选：从环境变量读取鉴权密钥，不设置则不鉴权
+# 可选鉴权密钥，不设置则不鉴权
 API_KEY = os.getenv("MCP_API_KEY")
 
+app = FastAPI()
 mcp = FastMCP("AKShare金融数据")
+
+# 鉴权中间件
+@app.middleware("http")
+async def verify_api_key(request: Request, call_next):
+    if API_KEY:
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer ") or auth.split(" ")[1] != API_KEY:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+    return await call_next(request)
 
 # 工具1：个股日线行情
 @mcp.tool(description="获取A股个股日线历史行情，前复权")
@@ -39,6 +50,8 @@ def stock_spot(symbol: str) -> str:
     except Exception as e:
         return f"查询失败: {str(e)}"
 
-# 生成 Streamable HTTP 兼容的 ASGI 应用，适配 Vercel Serverless
-app = mcp.streamable_http_app()
+# 关键：挂载到 /api/mcp 路径，和 Vercel 访问路径完全匹配
+app.mount("/api/mcp", mcp.streamable_http_app())
+
+# Vercel 入口
 handler = Mangum(app)
