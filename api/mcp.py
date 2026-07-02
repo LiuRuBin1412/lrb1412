@@ -1,5 +1,19 @@
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from mangum import Mangum
 import json
 import requests
+
+app = FastAPI()
+
+# 自动处理所有跨域预检（OPTIONS）请求，返回标准204响应
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # 工具定义
 TOOLS = [
@@ -75,61 +89,39 @@ def calc_rsi(prices, period=14):
             rsi.append(round(100 - 100/(1 + avg_g/avg_l), 2))
     return rsi
 
-# Vercel 原生入口
-def handler(event, context):
-    method = event.get("httpMethod", "POST")
-    headers = {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Accept",
-        "Cache-Control": "no-store"
-    }
-
-    # 处理跨域预检请求
-    if method == "OPTIONS":
-        return {
-            "statusCode": 204,
-            "headers": headers,
-            "body": ""
-        }
-
-    # 处理POST业务请求
-    try:
-        body = json.loads(event.get("body", "{}"))
-    except:
-        return {
-            "statusCode": 400,
-            "headers": headers,
-            "body": json.dumps({"error": "Invalid JSON"})
-        }
-
-    method_name = body.get("method")
+@app.post("/")
+async def mcp_endpoint(request: Request):
+    body = await request.json()
+    method = body.get("method")
     req_id = body.get("id")
     params = body.get("params", {})
 
     # 通知类请求（无id）返回202
     if req_id is None:
-        return {
-            "statusCode": 202,
-            "headers": headers,
-            "body": ""
-        }
+        return Response(status_code=202)
 
     # 1. 初始化握手
-    if method_name == "initialize":
-        result = {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": "行情指标MCP", "version": "2.1.0"}
+    if method == "initialize":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "行情指标MCP", "version": "2.2.0"}
+            }
         }
-        response = {"jsonrpc": "2.0", "id": req_id, "result": result}
 
     # 2. 工具列表
-    elif method_name == "tools/list":
-        response = {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
+    elif method == "tools/list":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {"tools": TOOLS}
+        }
 
     # 3. 工具调用
-    elif method_name == "tools/call":
+    elif method == "tools/call":
         name = params.get("name")
         args = params.get("arguments", {})
         try:
@@ -152,13 +144,13 @@ def handler(event, context):
             else:
                 text = "未知工具"
 
-            response = {
+            return {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {"content": [{"type": "text", "text": text}]}
             }
         except Exception as e:
-            response = {
+            return {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {"content": [{"type": "text", "text": f"查询失败: {str(e)}"}]}
@@ -166,14 +158,10 @@ def handler(event, context):
 
     # 未知方法
     else:
-        response = {
+        return {
             "jsonrpc": "2.0",
             "id": req_id,
             "error": {"code": -32601, "message": "Method not found"}
         }
 
-    return {
-        "statusCode": 200,
-        "headers": {**headers, "Content-Type": "application/json"},
-        "body": json.dumps(response, ensure_ascii=False)
-    }
+handler = Mangum(app)
