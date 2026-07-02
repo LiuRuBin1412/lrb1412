@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
 import json
@@ -6,7 +6,7 @@ import requests
 
 app = FastAPI()
 
-# 自动处理所有跨域预检（OPTIONS）请求，返回标准204响应
+# 自动处理所有跨域预检（OPTIONS）请求
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -89,14 +89,15 @@ def calc_rsi(prices, period=14):
             rsi.append(round(100 - 100/(1 + avg_g/avg_l), 2))
     return rsi
 
-@app.post("/")
+# 修正：路由与Vercel路径完全匹配
+@app.post("/api/mcp")
 async def mcp_endpoint(request: Request):
     body = await request.json()
     method = body.get("method")
     req_id = body.get("id")
     params = body.get("params", {})
 
-    # 通知类请求（无id）返回202
+    # 通知类请求（无id）按规范返回202
     if req_id is None:
         return Response(status_code=202)
 
@@ -108,7 +109,7 @@ async def mcp_endpoint(request: Request):
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "行情指标MCP", "version": "2.2.0"}
+                "serverInfo": {"name": "行情指标MCP", "version": "2.3.0"}
             }
         }
 
