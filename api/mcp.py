@@ -1,8 +1,20 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastmcp import FastMCP
 from mangum import Mangum
 import requests
 
-# 初始化MCP服务
+app = FastAPI()
+
+# 关键修复：全开跨域，处理OPTIONS预检请求
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 mcp = FastMCP("行情指标MCP")
 
 # 获取日线前复权数据
@@ -67,9 +79,6 @@ def calc_rsi(prices, period=14):
 # 注册工具
 @mcp.tool(description="获取A股个股技术指标，包含EMA12、EMA50均线，MACD全套，RSI14")
 def stock_technical_indicators(symbol: str) -> str:
-    """
-    symbol: 6位股票代码，例如 000001
-    """
     dates, closes = get_kline_data(symbol)
     e12 = calc_ema(closes, 12)
     e50 = calc_ema(closes, 50)
@@ -85,5 +94,8 @@ def stock_technical_indicators(symbol: str) -> str:
         )
     return "\n".join(lines)
 
-# Vercel 入口：直接包装MCP原生ASGI应用，协议完全标准
-handler = Mangum(mcp.streamable_http_app())
+# 挂载MCP流式服务到根路径，适配Vercel路由
+app.mount("/", mcp.streamable_http_app())
+
+# Vercel 入口
+handler = Mangum(app)
