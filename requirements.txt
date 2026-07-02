@@ -1,4 +1,3 @@
 fastapi
 mangum
-akshare
-pandas
+requests
