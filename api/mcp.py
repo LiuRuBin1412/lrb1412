@@ -6,7 +6,7 @@ import requests
 
 app = FastAPI()
 
-# 跨域中间件兜底
+# 自动处理所有跨域预检（OPTIONS）请求
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -29,19 +29,6 @@ TOOLS = [
         }
     }
 ]
-
-# 手动处理OPTIONS预检请求，确保100%通过
-@app.options("/api/mcp")
-async def options_handler():
-    return Response(
-        status_code=204,
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Accept",
-            "Cache-Control": "no-store"
-        }
-    )
 
 # 获取日线前复权数据
 def get_kline_data(symbol: str, count: int = 80):
@@ -102,7 +89,8 @@ def calc_rsi(prices, period=14):
             rsi.append(round(100 - 100/(1 + avg_g/avg_l), 2))
     return rsi
 
-@app.post("/api/mcp")
+# 修正：使用根路由，匹配Vercel的路径映射规则
+@app.post("/")
 async def mcp_endpoint(request: Request):
     body = await request.json()
     method = body.get("method")
