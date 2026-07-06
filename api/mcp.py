@@ -1,7 +1,17 @@
+from fastapi import FastAPI, Request, Response
+from mangum import Mangum
 import json
 import requests
 
-# 工具定义
+app = FastAPI()
+
+CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "POST, OPTIONS, GET, DELETE",
+    "Access-Control-Allow-Headers": "Content-Type, Accept, Mcp-Session-Id",
+    "Cache-Control": "no-store"
+}
+
 TOOLS = [
     {
         "name": "stock_technical_indicators",
@@ -16,11 +26,7 @@ TOOLS = [
     }
 ]
 
-# 包装标准SSE事件格式
-def sse(data: dict) -> str:
-    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-# 行情数据获取
+# 行情数据接口
 def get_kline_data(symbol: str, count: int = 80):
     secid = f"1.{symbol}" if symbol.startswith("6") else f"0.{symbol}"
     url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
@@ -43,7 +49,7 @@ def get_kline_data(symbol: str, count: int = 80):
         closes.append(float(parts[2]))
     return dates, closes
 
-# 指标计算
+# 指标计算工具
 def calc_ema(prices, period):
     ema = [prices[0]]
     k = 2 / (period + 1)
@@ -76,68 +82,64 @@ def calc_rsi(prices, period=14):
             rsi.append(round(100 - 100 / (1 + avg_g / avg_l), 2))
     return rsi
 
-# Vercel 原生入口函数（无任何框架）
-def handler(event, context):
-    http_method = event.get("httpMethod", "POST")
-    # 统一基础响应头
-    base_headers = {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Accept",
-        "Cache-Control": "no-cache",
-        "X-Accel-Buffering": "no"
-    }
+# 跨域预检
+@app.options("/api/mcp")
+async def cors_preflight():
+    return Response(status_code=204, headers=CORS_HEADERS)
 
-    # 1. 处理跨域预检请求
-    if http_method == "OPTIONS":
-        return {
-            "statusCode": 204,
-            "headers": base_headers,
-            "body": ""
-        }
+# 兼容客户端GET长连接请求（直接返回空，不开启流）
+@app.get("/api/mcp")
+async def get_stream_placeholder():
+    return Response(status_code=200, headers=CORS_HEADERS, content="")
 
-    # 2. 仅允许POST请求
-    if http_method != "POST":
-        return {
-            "statusCode": 405,
-            "headers": base_headers,
-            "body": json.dumps({"detail": "Method Not Allowed"})
-        }
+# 会话销毁接口
+@app.delete("/api/mcp")
+async def delete_session():
+    return Response(status_code=200, headers=CORS_HEADERS)
 
-    # 3. 解析JSON请求体
+# 核心POST业务接口
+@app.post("/api/mcp")
+async def mcp_handler(request: Request):
     try:
-        body = json.loads(event.get("body", "{}"))
+        body = await request.json()
     except:
-        return {
-            "statusCode": 400,
-            "headers": {**base_headers, "Content-Type": "text/event-stream"},
-            "body": sse({"error": "Invalid JSON"})
-        }
+        return Response(
+            content=json.dumps({"error": "Invalid JSON"}),
+            media_type="application/json",
+            headers=CORS_HEADERS,
+            status_code=400
+        )
 
     rpc_method = body.get("method")
     req_id = body.get("id")
     params = body.get("params", {})
 
-    # 4. 无id的通知类请求，返回空SSE事件
+    # 无ID通知类请求，返回202
     if req_id is None:
-        return {
-            "statusCode": 200,
-            "headers": {**base_headers, "Content-Type": "text/event-stream"},
-            "body": sse({})
-        }
+        return Response(status_code=202, headers=CORS_HEADERS)
 
-    # 5. 处理MCP核心方法
+    # 初始化握手，返回会话标识头
     if rpc_method == "initialize":
         result = {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "stock-mcp", "version": "1.0.0"}
+            "serverInfo": {"name": "stock-indicator-mcp", "version": "1.0.0"}
         }
-        rpc_resp = {"jsonrpc": "2.0", "id": req_id, "result": result}
+        resp_body = {"jsonrpc": "2.0", "id": req_id, "result": result}
+        import uuid
+        session_id = str(uuid.uuid4())
+        resp_headers = {**CORS_HEADERS, "Mcp-Session-Id": session_id}
+        return Response(
+            content=json.dumps(resp_body, ensure_ascii=False),
+            media_type="application/json",
+            headers=resp_headers
+        )
 
+    # 工具列表查询
     elif rpc_method == "tools/list":
-        rpc_resp = {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
+        resp_body = {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
 
+    # 工具调用
     elif rpc_method == "tools/call":
         tool_name = params.get("name")
         args = params.get("arguments", {})
@@ -160,20 +162,22 @@ def handler(event, context):
                 text = "\n".join(lines)
             else:
                 text = "未知工具"
-            rpc_resp = {"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": text}]}}
+            resp_body = {"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": text}]}}
         except Exception as e:
-            rpc_resp = {"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": f"查询失败: {str(e)}"}]}}
+            resp_body = {"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": f"查询失败: {str(e)}"}]}}
 
+    # 未知方法
     else:
-        rpc_resp = {
+        resp_body = {
             "jsonrpc": "2.0",
             "id": req_id,
             "error": {"code": -32601, "message": "Method not found"}
         }
 
-    # 6. 以标准SSE格式返回
-    return {
-        "statusCode": 200,
-        "headers": {**base_headers, "Content-Type": "text/event-stream"},
-        "body": sse(rpc_resp)
-    }
+    return Response(
+        content=json.dumps(resp_body, ensure_ascii=False),
+        media_type="application/json",
+        headers=CORS_HEADERS
+    )
+
+handler = Mangum(app)
