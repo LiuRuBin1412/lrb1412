@@ -1,14 +1,15 @@
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import StreamingResponse
 from mangum import Mangum
 import json
 import requests
 
 app = FastAPI()
 
-# 统一跨域响应头
+# 统一跨域响应头，增加GET方法支持
 CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Accept",
     "Cache-Control": "no-store"
 }
@@ -88,14 +89,18 @@ def calc_rsi(prices, period=14):
             rsi.append(round(100 - 100 / (1 + rs), 2))
     return rsi
 
-# 处理跨域预检
+# 包装SSE事件格式
+def sse_event(data: dict):
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+# 跨域预检
 @app.options("/api/mcp")
 async def cors_preflight():
     return Response(status_code=204, headers=CORS_HEADERS)
 
-# 处理MCP业务请求
+# MCP主入口：SSE流式响应
 @app.post("/api/mcp")
-async def mcp_handler(request: Request):
+async def mcp_stream_handler(request: Request):
     try:
         body = await request.json()
     except:
@@ -171,9 +176,13 @@ async def mcp_handler(request: Request):
             "error": {"code": -32601, "message": "Method not found"}
         }
 
-    return Response(
-        content=json.dumps(response, ensure_ascii=False),
-        media_type="application/json",
+    # 以SSE流格式返回响应
+    def event_generator():
+        yield sse_event(response)
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
         headers=CORS_HEADERS
     )
 
