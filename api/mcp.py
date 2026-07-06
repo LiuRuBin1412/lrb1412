@@ -1,10 +1,10 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from mangum import Mangum
 
-app = FastAPI()
+# 变量名必须是 app，Vercel自动识别为ASGI入口
+app = FastAPI(redirect_slashes=False)
 
-# 标准CORS配置，自动处理OPTIONS预检
+# 标准CORS中间件，自动处理OPTIONS预检请求
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -13,9 +13,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 根路由对应外部 /api/mcp 路径
+# 内部根路由 对应外部访问路径 /api/mcp
 @app.post("/")
-async def test_post():
-    return {"status": "ok", "message": "POST请求正常"}
-
-handler = Mangum(app)
+async def test_post(request: Request):
+    body = await request.json()
+    return {"status": "ok", "received": body}
