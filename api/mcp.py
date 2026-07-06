@@ -5,12 +5,13 @@ import requests
 
 app = FastAPI()
 
-# 标准跨域头
-CORS_HEADERS = {
+# 标准响应头：跨域 + SSE 禁用缓冲
+BASE_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Accept",
-    "Cache-Control": "no-store"
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no"
 }
 
 # 工具定义
@@ -27,6 +28,10 @@ TOOLS = [
         }
     }
 ]
+
+# 包装标准SSE事件格式：data: <json>\n\n
+def to_sse(data: dict) -> str:
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 # 获取日线前复权数据
 def get_kline_data(symbol: str, count: int = 80):
@@ -79,29 +84,31 @@ def calc_rsi(prices, period=14):
                 gains += diff
             else:
                 losses += abs(diff)
-        avg_g = gains / period
-        avg_l = losses / period
-        if avg_l == 0:
+        avg_gain = gains / period
+        avg_loss = losses / period
+        if avg_loss == 0:
             rsi.append(100.0)
         else:
-            rsi.append(round(100 - 100 / (1 + avg_g / avg_l), 2))
+            rs = avg_gain / avg_loss
+            rsi.append(round(100 - 100 / (1 + rs), 2))
     return rsi
 
 # 跨域预检
 @app.options("/api/mcp")
 async def cors_preflight():
-    return Response(status_code=204, headers=CORS_HEADERS)
+    return Response(status_code=204, headers=BASE_HEADERS)
 
-# MCP 主入口：标准POST+JSON响应
+# MCP Streamable HTTP 主入口
 @app.post("/api/mcp")
-async def mcp_handler(request: Request):
+async def mcp_stream_handler(request: Request):
     try:
         body = await request.json()
     except:
+        sse_error = to_sse({"error": "Invalid JSON"})
         return Response(
-            content=json.dumps({"error": "Invalid JSON"}),
-            media_type="application/json",
-            headers=CORS_HEADERS,
+            content=sse_error,
+            media_type="text/event-stream",
+            headers=BASE_HEADERS,
             status_code=400
         )
 
@@ -109,9 +116,14 @@ async def mcp_handler(request: Request):
     req_id = body.get("id")
     params = body.get("params", {})
 
-    # 通知类请求（无id）按MCP规范返回202
+    # 处理无id的通知类请求（如initialized），按规范返回空
     if req_id is None:
-        return Response(status_code=202, headers=CORS_HEADERS)
+        return Response(
+            content=to_sse({}),
+            media_type="text/event-stream",
+            headers=BASE_HEADERS,
+            status_code=200
+        )
 
     # 1. 初始化握手
     if rpc_method == "initialize":
@@ -120,11 +132,11 @@ async def mcp_handler(request: Request):
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "stock-indicator-mcp", "version": "1.0.0"}
         }
-        response = {"jsonrpc": "2.0", "id": req_id, "result": result}
+        rpc_response = {"jsonrpc": "2.0", "id": req_id, "result": result}
 
     # 2. 工具列表查询
     elif rpc_method == "tools/list":
-        response = {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
+        rpc_response = {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
 
     # 3. 工具调用
     elif rpc_method == "tools/call":
@@ -150,13 +162,13 @@ async def mcp_handler(request: Request):
             else:
                 text = "未知工具"
 
-            response = {
+            rpc_response = {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {"content": [{"type": "text", "text": text}]}
             }
         except Exception as e:
-            response = {
+            rpc_response = {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {"content": [{"type": "text", "text": f"查询失败: {str(e)}"}]}
@@ -164,16 +176,17 @@ async def mcp_handler(request: Request):
 
     # 未知方法
     else:
-        response = {
+        rpc_response = {
             "jsonrpc": "2.0",
             "id": req_id,
             "error": {"code": -32601, "message": "Method not found"}
         }
 
+    # 以标准SSE格式返回
     return Response(
-        content=json.dumps(response, ensure_ascii=False),
-        media_type="application/json",
-        headers=CORS_HEADERS
+        content=to_sse(rpc_response),
+        media_type="text/event-stream",
+        headers=BASE_HEADERS
     )
 
 handler = Mangum(app)
