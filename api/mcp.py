@@ -1,15 +1,14 @@
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import StreamingResponse
 from mangum import Mangum
 import json
 import requests
 
 app = FastAPI()
 
-# 统一跨域响应头，增加GET方法支持
+# 标准跨域头
 CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Accept",
     "Cache-Control": "no-store"
 }
@@ -35,8 +34,8 @@ def get_kline_data(symbol: str, count: int = 80):
     url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
     params = {
         "secid": secid,
-        "fields1": "f1,f2,f3,f4,f5,f6",
-        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+        "fields1": "f1",
+        "fields2": "f51,f52,f53",
         "klt": "101",
         "fqt": "1",
         "end": "20500101",
@@ -73,34 +72,29 @@ def calc_macd(prices):
 def calc_rsi(prices, period=14):
     rsi = [None] * period
     for i in range(period, len(prices)):
-        gains, losses = 0, 0
+        gains, losses = 0.0, 0.0
         for j in range(i - period + 1, i + 1):
             diff = prices[j] - prices[j-1]
             if diff > 0:
                 gains += diff
             else:
-                losses -= diff
-        avg_gain = gains / period
-        avg_loss = losses / period
-        if avg_loss == 0:
+                losses += abs(diff)
+        avg_g = gains / period
+        avg_l = losses / period
+        if avg_l == 0:
             rsi.append(100.0)
         else:
-            rs = avg_gain / avg_loss
-            rsi.append(round(100 - 100 / (1 + rs), 2))
+            rsi.append(round(100 - 100 / (1 + avg_g / avg_l), 2))
     return rsi
-
-# 包装SSE事件格式
-def sse_event(data: dict):
-    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 # 跨域预检
 @app.options("/api/mcp")
 async def cors_preflight():
     return Response(status_code=204, headers=CORS_HEADERS)
 
-# MCP主入口：SSE流式响应
+# MCP 主入口：标准POST+JSON响应
 @app.post("/api/mcp")
-async def mcp_stream_handler(request: Request):
+async def mcp_handler(request: Request):
     try:
         body = await request.json()
     except:
@@ -115,7 +109,7 @@ async def mcp_stream_handler(request: Request):
     req_id = body.get("id")
     params = body.get("params", {})
 
-    # 通知类请求（无id）按规范返回202
+    # 通知类请求（无id）按MCP规范返回202
     if req_id is None:
         return Response(status_code=202, headers=CORS_HEADERS)
 
@@ -124,11 +118,11 @@ async def mcp_stream_handler(request: Request):
         result = {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "行情指标MCP", "version": "1.0.0"}
+            "serverInfo": {"name": "stock-indicator-mcp", "version": "1.0.0"}
         }
         response = {"jsonrpc": "2.0", "id": req_id, "result": result}
 
-    # 2. 工具列表
+    # 2. 工具列表查询
     elif rpc_method == "tools/list":
         response = {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
 
@@ -176,13 +170,9 @@ async def mcp_stream_handler(request: Request):
             "error": {"code": -32601, "message": "Method not found"}
         }
 
-    # 以SSE流格式返回响应
-    def event_generator():
-        yield sse_event(response)
-    
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
+    return Response(
+        content=json.dumps(response, ensure_ascii=False),
+        media_type="application/json",
         headers=CORS_HEADERS
     )
 
