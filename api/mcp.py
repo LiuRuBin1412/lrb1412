@@ -1,19 +1,5 @@
-from fastapi import FastAPI, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
-from mangum import Mangum
 import json
 import requests
-
-app = FastAPI()
-
-# 自动处理所有跨域预检（OPTIONS）请求
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # 工具定义
 TOOLS = [
@@ -89,44 +75,75 @@ def calc_rsi(prices, period=14):
             rsi.append(round(100 - 100/(1 + avg_g/avg_l), 2))
     return rsi
 
-# 修正：使用根路由，匹配Vercel的路径映射规则
-@app.post("/")
-async def mcp_endpoint(request: Request):
-    body = await request.json()
-    method = body.get("method")
+# Vercel 原生入口，无任何框架依赖
+def handler(event, context):
+    method = event.get("httpMethod", "POST")
+    
+    # 统一跨域响应头
+    cors_headers = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Accept",
+        "Cache-Control": "no-store"
+    }
+
+    # 1. 处理跨域预检请求
+    if method == "OPTIONS":
+        return {
+            "statusCode": 204,
+            "headers": cors_headers,
+            "body": ""
+        }
+
+    # 2. 仅允许POST请求
+    if method != "POST":
+        return {
+            "statusCode": 405,
+            "headers": cors_headers,
+            "body": json.dumps({"detail": "Method Not Allowed"})
+        }
+
+    # 3. 解析请求体
+    try:
+        body = json.loads(event.get("body", "{}"))
+    except:
+        return {
+            "statusCode": 400,
+            "headers": cors_headers,
+            "body": json.dumps({"error": "Invalid JSON"})
+        }
+
+    rpc_method = body.get("method")
     req_id = body.get("id")
     params = body.get("params", {})
 
-    # 通知类请求（无id）按规范返回202
+    # 4. 通知类请求（无id）按MCP规范返回202
     if req_id is None:
-        return Response(status_code=202)
-
-    # 1. 初始化握手
-    if method == "initialize":
         return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "行情指标MCP", "version": "2.4.0"}
-            }
+            "statusCode": 202,
+            "headers": cors_headers,
+            "body": ""
         }
 
-    # 2. 工具列表
-    elif method == "tools/list":
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {"tools": TOOLS}
+    # 5. 处理初始化握手
+    if rpc_method == "initialize":
+        result = {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "行情指标MCP", "version": "3.0.0"}
         }
+        response = {"jsonrpc": "2.0", "id": req_id, "result": result}
 
-    # 3. 工具调用
-    elif method == "tools/call":
-        name = params.get("name")
+    # 6. 处理工具列表查询
+    elif rpc_method == "tools/list":
+        response = {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
+
+    # 7. 处理工具调用
+    elif rpc_method == "tools/call":
+        tool_name = params.get("name")
         args = params.get("arguments", {})
         try:
-            if name == "stock_technical_indicators":
+            if tool_name == "stock_technical_indicators":
                 symbol = args["symbol"]
                 dates, closes = get_kline_data(symbol)
                 e12 = calc_ema(closes, 12)
@@ -145,24 +162,28 @@ async def mcp_endpoint(request: Request):
             else:
                 text = "未知工具"
 
-            return {
+            response = {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {"content": [{"type": "text", "text": text}]}
             }
         except Exception as e:
-            return {
+            response = {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {"content": [{"type": "text", "text": f"查询失败: {str(e)}"}]}
             }
 
-    # 未知方法
+    # 8. 未知方法
     else:
-        return {
+        response = {
             "jsonrpc": "2.0",
             "id": req_id,
             "error": {"code": -32601, "message": "Method not found"}
         }
 
-handler = Mangum(app)
+    return {
+        "statusCode": 200,
+        "headers": {**cors_headers, "Content-Type": "application/json"},
+        "body": json.dumps(response, ensure_ascii=False)
+    }
