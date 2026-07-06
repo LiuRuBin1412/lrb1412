@@ -1,20 +1,33 @@
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Request, Response
+from mangum import Mangum
 
-# 变量名必须是 app，Vercel自动识别为ASGI入口
-app = FastAPI(redirect_slashes=False)
+app = FastAPI()
 
-# 标准CORS中间件，自动处理OPTIONS预检请求
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 统一跨域响应头
+CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Accept",
+    "Cache-Control": "no-store"
+}
 
-# 内部根路由 对应外部访问路径 /api/mcp
+# 显式处理OPTIONS跨域预检，彻底避免404
+@app.options("/")
+async def cors_preflight():
+    return Response(status_code=204, headers=CORS_HEADERS)
+
+# POST业务路由，对应外部路径 /api/mcp
 @app.post("/")
-async def test_post(request: Request):
-    body = await request.json()
-    return {"status": "ok", "received": body}
+async def handle_post(request: Request):
+    try:
+        body = await request.json()
+    except:
+        body = "invalid json"
+    return Response(
+        content='{"status": "ok", "echo": ' + repr(body) + '}',
+        media_type="application/json",
+        headers=CORS_HEADERS
+    )
+
+# Vercel标准入口：必须导出handler变量
+handler = Mangum(app)
